@@ -93,32 +93,87 @@ function processGpxFile(e) {
     }), l
 }
 
+/**
+ * 將分鐘數轉換為 [分:秒] 的配速格式 (例如 5.5 min/km -> 5:30)
+ * @param {number} distanceKm - 距離 (公里)
+ * @param {number} timeMinutes - 時間 (分鐘)
+ * @returns {string} 配速字串 (M:SS)
+ */
+
+function calculatePace(distanceKm, timeMinutes) {
+    if (distanceKm <= 0 || timeMinutes < 0) return "0:00";
+    
+    // 計算配速 (分鐘/公里)
+    const paceMinutesPerKm = timeMinutes / distanceKm;
+    
+    // 取整數分鐘部分
+    const minutes = Math.floor(paceMinutesPerKm);
+    
+    // 計算秒數部分
+    const seconds = Math.round((paceMinutesPerKm - minutes) * 60);
+    
+    // 處理秒數進位
+    if (seconds === 60) {
+        return `${minutes + 1}:00`;
+    }
+    
+    const formattedSeconds = seconds.toString().padStart(2, '0');
+    return `${minutes}:${formattedSeconds}`;
+}
+
+
+
+
 // --- 標記點邏輯 (保持不變) ---
 
 function getDistanceMarkers(t) {
     var a = [];
     if (0 !== t.length) {
         a.push({ ...t[0],
-            markerType: "Start"
+            markerType: "Start",
+            segmentPace: "N/A",
+            segmentDistance: 0
         });
         let nextMarkerDistance = DISTANCE_INTERVAL_KM;
+        let lastMarkerPoint = t[0];
 
         for (let e = 1; e < t.length - 1; e++) {
             const current = t[e];
             const next = t[e + 1];
 
             if (current.totalDistance3D >= nextMarkerDistance && next.totalDistance3D > current.totalDistance3D) {
-                a.push({ ...current,
-                    markerType: "Distance"
+                // 找到一個新的公里標記點
+                
+                // 計算分段數據
+                const segmentTimeMinutes = (current.timeMs - lastMarkerPoint.timeMs) / 6e4;
+                const segmentDistanceKm = current.totalDistance3D - lastMarkerPoint.totalDistance3D;
+                const segmentPace = calculatePace(segmentDistanceKm, segmentTimeMinutes);
+
+                a.push({ 
+                    ...current,
+                    markerType: "Distance",
+                    segmentPace: segmentPace, // 過去一公里的配速
+                    segmentDistance: nextMarkerDistance // 累計公里數標記
                 });
+                
+                // 更新下一個標記點的目標距離和起點
                 nextMarkerDistance += DISTANCE_INTERVAL_KM;
+                lastMarkerPoint = current; 
             }
         }
 
         var e = t[t.length - 1];
         if (a.length === 0 || a[a.length - 1].timeMs !== e.timeMs) {
-            a.push({ ...e,
-                markerType: "End"
+            // 處理終點
+            const totalDistanceKm = e.totalDistance3D;
+            const totalTimeMinutes = e.totalTime;
+            const avgPace = calculatePace(totalDistanceKm, totalTimeMinutes);
+
+            a.push({ 
+                ...e,
+                markerType: "End",
+                segmentPace: avgPace, // 終點顯示整體平均配速
+                segmentDistance: totalDistanceKm
             });
         }
     }
@@ -177,6 +232,8 @@ function getTrackMarkers(trackId, mode) {
 
 // --- 繪製與管理多軌跡 (保持不變) ---
 
+// --- 繪製與管理多軌跡 ---
+
 function renderGpxTracks() {
     let allCoords = [];
     const trackList = document.getElementById("gpxTrackList");
@@ -231,7 +288,39 @@ function renderGpxTracks() {
                     t = t ? t.toLocaleString() : "時間未知",
                     a = void 0 !== e.elevation ? `海拔:${e.elevation.toFixed(1)}m` : "";
 
-                let markerTypeText = globalMarkerMode === 'distance' ? `每 ${DISTANCE_INTERVAL_KM}km 標記` : e.markerType;
+                let popupContent = `<strong>${track.name}</strong><br>時間:${t}<br>${a}<br>GPS:${e.lat.toFixed(5)},${e.lon.toFixed(5)}`;
+                
+                // 核心變動：根據模式顯示配速與公里數
+                if (globalMarkerMode === 'distance' && e.segmentPace) {
+                    if (e.markerType === 'Distance') {
+                        popupContent = `
+                            <strong>${track.name} (第 ${e.segmentDistance.toFixed(0)} 公里)</strong><br>
+                            模式: 每公里標記<br>
+                            **過去 1 公里配速:** <span style="font-weight: bold; color: green; font-size: 1.1em;">${e.segmentPace} /km</span><br>
+                            時間:${t}<br>${a}<br>
+                            GPS:${e.lat.toFixed(5)},${e.lon.toFixed(5)}
+                        `;
+                    } else if (e.markerType === 'End') {
+                        // 終點顯示整體平均配速
+                        const overallPace = calculatePace(track.rawPoints[track.rawPoints.length-1].totalDistance3D, track.rawPoints[track.rawPoints.length-1].totalTime);
+                        popupContent = `
+                            <strong>${track.name} (終點)</strong><br>
+                            總距離: ${track.rawPoints[track.rawPoints.length-1].totalDistance3D.toFixed(2)} km<br>
+                            **整體平均配速:** <span style="font-weight: bold; color: blue; font-size: 1.1em;">${overallPace} /km</span><br>
+                            時間:${t}<br>${a}<br>
+                            GPS:${e.lat.toFixed(5)},${e.lon.toFixed(5)}
+                        `;
+                    }
+                } else {
+                    // 其他模式或起點/終點的預設顯示
+                    let markerTypeText = globalMarkerMode === 'hourly' ? `每小時標記` : e.markerType;
+                    popupContent = `
+                        <strong>${track.name} (${markerTypeText})</strong><br>
+                        時間:${t}<br>${a}<br>
+                        GPS:${e.lat.toFixed(5)},${e.lon.toFixed(5)}
+                    `;
+                }
+
 
                 L.circleMarker([e.lat, e.lon], {
                     radius: 6,
@@ -239,13 +328,7 @@ function renderGpxTracks() {
                     fillColor: trackColor,
                     fillOpacity: 1,
                     weight: 2
-                }).bindPopup(`
-                    <strong>${track.name}</strong><br>
-                    模式: ${markerTypeText}<br>
-                    時間:${t}<br>
-                    ${a}<br>
-                    GPS:${e.lat.toFixed(5)},${e.lon.toFixed(5)}
-                `).addTo(track.leafletLayer)
+                }).bindPopup(popupContent).addTo(track.leafletLayer)
             });
 
             track.leafletLayer.addTo(map); // 將新圖層加入地圖
@@ -295,14 +378,47 @@ function renderGpxTracks() {
             }
         });
 
-        // 新增「查看」按鈕事件
+        // 新增「查看」按鈕事件 (配速概覽)
         listItem.querySelector('.go-to-start-point').addEventListener('click', function() {
             const firstPoint = allGpxTracks[id].rawPoints[0];
-            if (firstPoint) {
-                map.flyTo([firstPoint.lat, firstPoint.lon], 15, {
-                    duration: 1
-                });
-            }
+            if (!firstPoint) return;
+            
+            // 飛到起點
+            map.flyTo([firstPoint.lat, firstPoint.lon], 15, { duration: 1 });
+            
+            // 產生配速資訊列表
+            const distanceMarkers = getDistanceMarkers(allGpxTracks[id].rawPoints);
+            
+            let paceListHTML = '<div style="max-height: 200px; overflow-y: auto;">';
+            let segmentCount = 0;
+            
+            // 僅顯示分段配速點
+            distanceMarkers.forEach(marker => {
+                 if (marker.markerType === 'Distance') {
+                    segmentCount++;
+                    paceListHTML += `<div style="padding: 5px; border-bottom: 1px dotted #ccc;">
+                        **第 ${segmentCount} 公里**: <span style="color: green; font-weight: bold;">${marker.segmentPace} /km</span>
+                    </div>`;
+                }
+            });
+
+            const overallPace = calculatePace(
+                allGpxTracks[id].rawPoints[allGpxTracks[id].rawPoints.length-1].totalDistance3D, 
+                allGpxTracks[id].rawPoints[allGpxTracks[id].rawPoints.length-1].totalTime
+            );
+
+            paceListHTML += `</div>`; // 結束滾動區
+
+            const overviewPopup = L.popup()
+                .setLatLng([firstPoint.lat, firstPoint.lon])
+                .setContent(`
+                    <h4>${allGpxTracks[id].name} - 配速概覽</h4>
+                    <p style="font-size: 1.1em; font-weight: bold;">總距離: ${allGpxTracks[id].rawPoints[allGpxTracks[id].rawPoints.length-1].totalDistance3D.toFixed(2)} km</p>
+                    <p style="font-size: 1.1em; font-weight: bold;">平均配速: <span style="color: blue;">${overallPace} /km</span></p>
+                    <hr>
+                    ${paceListHTML}
+                `)
+                .openOn(map);
         });
 
         trackList.appendChild(listItem);
@@ -383,10 +499,12 @@ function handleClearData() {
     }
 }
 
+// --- 匯出數據 ---
+
 function exportConsolidatedData() {
-    // ... (保持不變)
     const allExportPoints = [];
-    const mode = globalMarkerMode === 'none' ? 'distance' : globalMarkerMode; // 匯出時如果為 'none'，則預設匯出 distance mode 的點
+    // 匯出時如果全域為 'none'，則預設匯出 distance mode 的點
+    const mode = globalMarkerMode === 'none' ? 'distance' : globalMarkerMode; 
 
     Object.keys(allGpxTracks).forEach(id => {
         const track = allGpxTracks[id];
@@ -397,7 +515,7 @@ function exportConsolidatedData() {
             let pointsToExport = points.length > 0 ? points : [track.rawPoints[0], track.rawPoints[track.rawPoints.length-1]].filter(p => p);
 
 
-            let accumulatedTimeMin = 0;
+            let accumulatedTimeMs = pointsToExport.length > 0 ? pointsToExport[0].timeMs : 0;
             let accumulatedDistance3D = 0;
 
             for (let i = 0; i < pointsToExport.length; i++) {
@@ -407,9 +525,11 @@ function exportConsolidatedData() {
                 let timeElapsedMin = 0;
                 let distance3DSinceLast = 0;
                 let elevationChange = 0;
+                let overallPace = "0:00"; // 儲存該點位的累積平均配速
 
                 if (prev) {
                     timeElapsedMin = (current.timeMs - prev.timeMs) / 6e4;
+                    
                     if (current.elevation !== undefined && prev.elevation !== undefined) {
                         elevationChange = current.elevation - prev.elevation;
                         const prevEle = prev.elevation !== undefined ? prev.elevation : 0;
@@ -419,9 +539,15 @@ function exportConsolidatedData() {
                         elevationChange = NaN;
                         distance3DSinceLast = haversineDistance(prev.lat, prev.lon, current.lat, current.lon);
                     }
-                    accumulatedTimeMin += timeElapsedMin;
+                    accumulatedTimeMs = current.timeMs; // 使用當前點的時間戳
                     accumulatedDistance3D += distance3DSinceLast;
                 }
+                
+                // 計算整體平均配速 (從軌跡起點到該點)
+                const totalTimeMinutes = (current.timeMs - track.rawPoints[0].timeMs) / 6e4;
+                const totalDistance3D = current.totalDistance3D;
+                overallPace = calculatePace(totalDistance3D, totalTimeMinutes);
+
 
                 allExportPoints.push({
                     trackName: track.name,
@@ -435,7 +561,8 @@ function exportConsolidatedData() {
                     distance3D: distance3DSinceLast.toFixed(4),
                     elevationChange: !isNaN(elevationChange) ? elevationChange.toFixed(2) : "N/A",
                     name: `GPX標記點(${current.markerType || '邊界'})`,
-                    totalDistance3D: accumulatedDistance3D.toFixed(3)
+                    totalDistance3D: current.totalDistance3D, // 使用 rawPoints 中的累積距離
+                    overallPace: overallPace // 新增平均配速
                 });
             }
         }
@@ -446,11 +573,13 @@ function exportConsolidatedData() {
         return;
     }
 
+    // 排序
     allExportPoints.sort((a, b) => a.timeMs - b.timeMs);
 
-    let csvContent = "路線名稱,類型,時間,緯度,經度,海拔(m),與前點時間差(時:分:秒),海拔變化(m),行走距離差(km),名稱/備註\n";
+    // 修改 CSV 標題和內容以包含累積里程和平均配速
+    let csvContent = "路線名稱,類型,時間,累積距離(km),緯度,經度,海拔(m),累積平均配速(分:秒/km),與前點時間差(時:分:秒),海拔變化(m),行走距離差(km),名稱/備註\n";
     allExportPoints.forEach(e => {
-        csvContent += `"${e.trackName}",${e.type},"${e.time}",${e.lat.toFixed(6)},${e.lon.toFixed(6)},${e.elevation},${e.timeElapsed},${e.elevationChange},${e.distance3D},"${e.name}"\n`
+        csvContent += `"${e.trackName}",${e.type},"${e.time}",${e.totalDistance3D.toFixed(3)},${e.lat.toFixed(6)},${e.lon.toFixed(6)},${e.elevation},${e.overallPace},${e.timeElapsed},${e.elevationChange},${e.distance3D},"${e.name}"\n`
     });
 
     var a = new Blob(["\ufeff" + csvContent], {
